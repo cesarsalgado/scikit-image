@@ -6,6 +6,7 @@ import numpy as np
 from .._shared.utils import assert_nD
 from ..util import img_as_float
 from ..color import gray2rgb
+# noinspection PyUnresolvedReferences,PyProtectedMember
 from ._texture import (_glcm_loop,
                        _local_binary_pattern,
                        _multiblock_lbp)
@@ -116,6 +117,7 @@ def greycomatrix(image, distances, angles, levels=None, symmetric=False,
                          "other than uint8. The resulting matrix will be at "
                          "least levels ** 2 in size.")
 
+    # noinspection PyUnresolvedReferences
     if np.issubdtype(image.dtype, np.signedinteger) and np.any(image < 0):
         raise ValueError("Negative-valued images are not supported.")
 
@@ -165,6 +167,9 @@ def greycoprops(P, prop='contrast'):
     - 'correlation':
         .. math:: \\sum_{i,j=0}^{levels-1} P_{i,j}\\left[\\frac{(i-\\mu_i) \\
                   (j-\\mu_j)}{\\sqrt{(\\sigma_i^2)(\\sigma_j^2)}}\\right]
+    - 'std':
+    - 'mean':
+    - 'entropy':
 
 
     Parameters
@@ -207,6 +212,10 @@ def greycoprops(P, prop='contrast'):
            [ 1.25      ,  2.75      ]])
 
     """
+    prop_is_set = isinstance(prop, (list, tuple, set))
+    if prop_is_set:
+        prop = set(prop)
+
     assert_nD(P, 4, 'P')
 
     (num_level, num_level2, num_dist, num_angle) = P.shape
@@ -214,6 +223,7 @@ def greycoprops(P, prop='contrast'):
     assert num_dist > 0
     assert num_angle > 0
 
+    pass_set = {'ASM', 'energy', 'entropy', 'correlation', 'std', 'mean'}
     # create weights for specified property
     I, J = np.ogrid[0:num_level, 0:num_level]
     if prop == 'contrast':
@@ -222,43 +232,76 @@ def greycoprops(P, prop='contrast'):
         weights = np.abs(I - J)
     elif prop == 'homogeneity':
         weights = 1. / (1. + (I - J) ** 2)
-    elif prop in ['ASM', 'energy', 'correlation']:
+    elif prop in pass_set:
+        pass
+    elif prop_is_set and prop.issubset(pass_set):
         pass
     else:
-        raise ValueError('%s is an invalid property' % (prop))
+        raise ValueError('%s is an invalid property' % prop)
 
+    corr_std_mean_set = {'correlation', 'std', 'mean'}
     # compute property for each GLCM
     if prop == 'energy':
+        # noinspection PyTypeChecker
         asm = np.apply_over_axes(np.sum, (P ** 2), axes=(0, 1))[0, 0]
         results = np.sqrt(asm)
     elif prop == 'ASM':
+        # noinspection PyTypeChecker
         results = np.apply_over_axes(np.sum, (P ** 2), axes=(0, 1))[0, 0]
-    elif prop == 'correlation':
+    elif prop == 'entropy':
+        # noinspection PyTypeChecker
+        mPxlogP = -P*np.log(P)
+        mPxlogP[P == 0] = 0
+        results = np.apply_over_axes(np.sum, mPxlogP, axes=(0, 1))[0, 0]
+    elif prop in corr_std_mean_set or (prop_is_set and
+                                       prop.issubset(corr_std_mean_set)):
+        parts = []
         results = np.zeros((num_dist, num_angle), dtype=np.float64)
-        I = np.array(range(num_level)).reshape((num_level, 1, 1, 1))
-        J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
-        diff_i = I - np.apply_over_axes(np.sum, (I * P), axes=(0, 1))[0, 0]
-        diff_j = J - np.apply_over_axes(np.sum, (J * P), axes=(0, 1))[0, 0]
-
-        std_i = np.sqrt(np.apply_over_axes(np.sum, (P * (diff_i) ** 2),
+        I = np.arange(num_level).reshape((num_level, 1, 1, 1))
+        mean_i = np.apply_over_axes(np.sum, (I * P), axes=(0, 1))[0, 0]
+        if prop == 'mean':
+            return mean_i
+        elif 'mean' in prop:
+            parts.append(mean_i)
+        diff_i = I - mean_i
+        # noinspection PyTypeChecker
+        std_i = np.sqrt(np.apply_over_axes(np.sum, (P * diff_i ** 2),
                                            axes=(0, 1))[0, 0])
-        std_j = np.sqrt(np.apply_over_axes(np.sum, (P * (diff_j) ** 2),
-                                           axes=(0, 1))[0, 0])
-        cov = np.apply_over_axes(np.sum, (P * (diff_i * diff_j)),
-                                 axes=(0, 1))[0, 0]
+        if prop == 'std':
+            return std_i
+        elif 'std' in prop:
+            parts.append(std_i)
 
-        # handle the special case of standard deviations near zero
-        mask_0 = std_i < 1e-15
-        mask_0[std_j < 1e-15] = True
-        results[mask_0] = 1
+        if 'correlation' == prop or 'correlation' in prop:
+            J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
+            diff_j = J - np.apply_over_axes(np.sum, (J * P), axes=(0, 1))[0, 0]
+            # noinspection PyTypeChecker
+            std_j = np.sqrt(np.apply_over_axes(np.sum, (P * diff_j ** 2),
+                                               axes=(0, 1))[0, 0])
 
-        # handle the standard case
-        mask_1 = mask_0 == False
-        results[mask_1] = cov[mask_1] / (std_i[mask_1] * std_j[mask_1])
+            cov = np.apply_over_axes(np.sum, (P * (diff_i * diff_j)),
+                                     axes=(0, 1))[0, 0]
+
+            # handle the special case of standard deviations near zero
+            mask_0 = std_i < 1e-15
+            # noinspection PyUnresolvedReferences
+            mask_0[std_j < 1e-15] = True
+            results[mask_0] = 1
+
+            # handle the standard case
+            mask_1 = mask_0 == False
+            results[mask_1] = cov[mask_1] / (std_i[mask_1] * std_j[mask_1])
+            if 'correlation' == prop:
+                return results
+            else:
+                parts.append(results)
+        results = np.array(parts)
     elif prop in ['contrast', 'dissimilarity', 'homogeneity']:
+        # noinspection PyUnboundLocalVariable
         weights = weights.reshape((num_level, num_level, 1, 1))
         results = np.apply_over_axes(np.sum, (P * weights), axes=(0, 1))[0, 0]
 
+    # noinspection PyUnboundLocalVariable
     return results
 
 
@@ -369,8 +412,8 @@ def multiblock_lbp(int_image, r, c, width, height):
 
 def draw_multiblock_lbp(img, r, c, width, height,
                         lbp_code=0,
-                        color_greater_block=[1, 1, 1],
-                        color_less_block=[0, 0.69, 0.96],
+                        color_greater_block=(1, 1, 1),
+                        color_less_block=(0, 0.69, 0.96),
                         alpha=0.5
                         ):
     """Multi-block local binary pattern visualization.
@@ -401,8 +444,8 @@ def draw_multiblock_lbp(img, r, c, width, height,
         intensity value. They should be in the range [0, 1].
         Corresponding values define (R, G, B) values. Default value
         is white [1, 1, 1].
-    color_greater_block : list of 3 floats
-        Floats specifying the color for the block that has greater intensity
+    color_less_block : list of 3 floats
+        Floats specifying the color for the block that has less intensity
         value. They should be in the range [0, 1]. Corresponding values define
         (R, G, B) values. Default value is cyan [0, 0.69, 0.96].
     alpha : float
